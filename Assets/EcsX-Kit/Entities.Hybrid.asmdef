@@ -1,0 +1,24 @@
+{
+    "name": "Entities.Hybrid",
+    "rootNamespace": "",
+    "references": [
+        "GUID:d8b63aba1907145bea998dd612889d6b",
+        "GUID:b3d24bda43f71a647bbe95fe85adeae4",
+        "GUID:ae300c1611b2c0e4f8ba5eab8eca08fc",
+        "GUID:2665a8d13d1b3f18800f46e256720795",
+        "GUID:e0cd26848372d4e5c891c569017e11f1",
+        "GUID:807be9350277eff4182cd3600de41d3a",
+        "GUID:94872a2c5254d274991841a477d6e6ba",
+        "GUID:e04e6c86a9f3947eb95fded39f9e60cc",
+        "GUID:a5baed0c9693541a5bd947d336ec7659"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
