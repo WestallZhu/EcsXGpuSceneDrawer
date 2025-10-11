@@ -2723,6 +2723,8 @@ namespace Unity.Rendering
                 overrideMetadata[metadataIndex] = CreateMetadataValue(sVtfStrideID, vtfStridePacked, false);
 #if UNITY_MINIGAME
                 batchID = m_BatchRendererGroup.AddBatch(overrideMetadata, m_GPUPersistentInstanceBufferHandle, bindOffset, bindWindowSize, m_TextureSceneList[pageIdx]);
+#else
+                batchID = default;
 #endif
             }
             else
