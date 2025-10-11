@@ -536,6 +536,12 @@ namespace Unity.Rendering
         private BatchRendererGroup m_BatchRendererGroup;
         private ThreadedBatchContext m_ThreadedBatchContext;
 
+        private bool m_UseTextureScene;
+        private List<Texture2D> m_TextureSceneList;
+        private int m_TextureScenePageSize;
+        private int m_TextureScenePageWidth;
+        private int m_TextureScenePageHeight;
+
         private GraphicsBuffer m_GPUPersistentInstanceData;
 
         private GraphicsBufferHandle m_GPUPersistentInstanceBufferHandle;
@@ -664,8 +670,14 @@ namespace Unity.Rendering
 
         private float m_PlanarShadowCullDist = 100;
 
+        static int sVtfStrideID = Shader.PropertyToID("unity_VTFStride");
         protected override void OnCreate()
         {
+
+#if UNITY_MINIGAME
+            m_UseTextureScene = true;
+            m_TextureSceneList = new List<Texture2D>();
+#endif
 
             if (!EntitiesGraphicsEnabled)
             {
@@ -731,7 +743,8 @@ namespace Unity.Rendering
                 BatchCullingViewType.Picking,
                 BatchCullingViewType.SelectionOutline
             });
-            m_ThreadedBatchContext = m_BatchRendererGroup.GetThreadedBatchContext();
+            if(!m_UseTextureScene)
+                m_ThreadedBatchContext = m_BatchRendererGroup.GetThreadedBatchContext();
             m_ForceLowLOD = NewNativeListResized<byte>(kInitialMaxBatchCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 
             m_ResetLod = true;
@@ -836,8 +849,17 @@ namespace Unity.Rendering
             }
 
             bool useConstantBuffer = BatchRendererGroup.BufferTarget == BatchBufferTarget.ConstantBuffer;
-
-            if (useConstantBuffer && m_UseDirectUpload)
+            if (m_UseTextureScene)
+            {
+                DecomposePowerOfTwo((int)m_PersistentInstanceDataSize / 16, out int height, out int width);
+                var textureScene = new Texture2D(width, height, TextureFormat.RGBAFloat, false);
+                m_TextureScenePageWidth = width;
+                m_TextureScenePageHeight = height;
+                m_TextureScenePageSize = m_TextureScenePageWidth * m_TextureScenePageHeight * 16;
+                m_PersistentInstanceDataSize = m_TextureScenePageSize;
+                m_TextureSceneList.Add(textureScene);
+            }
+            else if (useConstantBuffer && m_UseDirectUpload)
             {
                 m_GPUPersistentInstanceData = new GraphicsBuffer(
                     GraphicsBuffer.Target.Constant,
@@ -852,7 +874,7 @@ namespace Unity.Rendering
                     4);
             }
 
-            m_GPUPersistentInstanceBufferHandle = m_GPUPersistentInstanceData.bufferHandle;
+            m_GPUPersistentInstanceBufferHandle = m_UseTextureScene ? new GraphicsBufferHandle() : m_GPUPersistentInstanceData.bufferHandle;
 
             if (m_UseDirectUpload)
             {
@@ -865,7 +887,10 @@ namespace Unity.Rendering
                 m_DirectUploader = new DirectUploader(
                     m_GPUPersistentInstanceData,
                     m_SystemMemoryBuffer,
-                    m_PersistentInstanceDataSize);
+                    m_PersistentInstanceDataSize,
+                    GetNativeTexturePtrs(m_TextureSceneList),
+                    m_TextureScenePageWidth,
+                    m_TextureScenePageHeight);
 
                 Debug.Log("EntitiesGraphicsSystem: Using DirectUploader for GPU uploads");
             }
@@ -903,6 +928,31 @@ namespace Unity.Rendering
                 m_BatchRendererGroup.SetPickingMaterial(m_PickingMaterial);
             }
 #endif
+        }
+
+        static int DecomposePowerOfTwo(int num, out int height, out int width)
+        {
+            System.Diagnostics.Debug.Assert(num > 0 && (num & (num - 1)) == 0);
+
+            int n = 0;
+            int x = num;
+            while ((x >>= 1) != 0) n++; // n = floor(log2(num))
+
+            height = 1 << (n / 2);
+            width = 1 << ((n + 1) / 2);
+
+            return width - height;
+        }
+        static NativeArray<IntPtr> GetNativeTexturePtrs(List<Texture2D> textureList)
+        {
+            if (textureList == null)
+                return new NativeArray<IntPtr>();
+            NativeArray<IntPtr> texturePtrs = new NativeArray<IntPtr>(textureList.Count, Allocator.Persistent);
+            for (int i = 0; i < texturePtrs.Length; i++)
+            {
+                texturePtrs[i] = textureList[i].GetNativeTexturePtr();
+            }
+            return texturePtrs;
         }
 
         internal static readonly bool UseConstantBuffers = EntitiesGraphicsUtils.UseHybridConstantBufferMode();
@@ -1289,7 +1339,10 @@ namespace Unity.Rendering
 
             p.GraphicsArchetypeIndex = InvalidIndex;
 
-            m_ThreadedBatchContext.RemoveBatch(new BatchID { value = (uint) batchIndex });
+            if (m_UseTextureScene)
+                m_BatchRendererGroup.RemoveBatch(new BatchID { value = (uint)batchIndex });
+            else
+                m_ThreadedBatchContext.RemoveBatch(new BatchID { value = (uint)batchIndex });
         }
 
          private void EnsureArchetypeIndex(int arch)
@@ -1378,8 +1431,13 @@ namespace Unity.Rendering
         private void Dispose()
         {
 
-            m_GPUPersistentInstanceData.Dispose();
+            m_GPUPersistentInstanceData?.Dispose();
 
+            if(m_TextureSceneList != null)
+            {
+                foreach(var texture in m_TextureSceneList)
+                    UnityEngine.Object.DestroyImmediate(texture);
+            }
 #if UNITY_EDITOR
             Memory.Unmanaged.Free(m_PerThreadStats, Allocator.Persistent);
 
@@ -1987,9 +2045,7 @@ namespace Unity.Rendering
 
             if (m_UseDirectUpload)
             {
-                Profiler.BeginSample("StartUpdate");
-                StartUpdate();
-                Profiler.EndSample();
+                CheckGPUPersistentResize();
 
                 m_DirectUploader.EnsureCapacity(totalChunks * m_ComponentTypeCache.UsedTypeCount * 2);
 
@@ -2350,6 +2406,13 @@ namespace Unity.Rendering
             return ((size + 15) >> 4) << 4;
         }
 
+
+        private static int Ctz(int v)
+        {
+            int r = 0;
+            while ((v >>= 1) != 0) r++;
+            return r;
+        }
         internal static MetadataValue CreateMetadataValue(int nameID, int gpuAddress, bool isOverridden)
         {
             const uint kPerInstanceDataBit = 0x80000000;
@@ -2539,22 +2602,6 @@ namespace Unity.Rendering
                 OverrideStreamBegin = overrideStreamBegin
             };
 
-            for (int i = 0; i < overrideStreamBegin.Length; i++)
-            {
-                int streamStart = overrideStreamBegin[i];
-                int streamSize = numInstances * overrides[i].SizeBytesGPU;
-                int streamEnd = streamStart + streamSize;
-
-                int gpuBufferSize = m_GPUPersistentInstanceData.count * m_GPUPersistentInstanceData.stride;
-                if (streamStart < 0 || streamEnd > gpuBufferSize)
-                {
-#if DEBUG_LOG_BATCH_CREATION
-                    Debug.LogError($"CRITICAL GPU BOUNDARY ERROR: Stream {i} [{streamStart}, {streamEnd}) exceeds buffer size {gpuBufferSize}");
-#endif
-                    return false;
-                }
-            }
-
             SetBatchChunkData(ref args, ref overrides);
 
             if (args.ChunkOffsetInBatch != offset + numInstances)
@@ -2634,15 +2681,17 @@ namespace Unity.Rendering
                     Debug.LogError($"Out of memory in the Entities Graphics GPU instance data buffer after resize.");
                     return false;
                 }
+                if (m_UseTextureScene)
+                    CheckGPUPersistentResize();
             }
             batchInfo.SubbatchAllocator = new SmallBlockAllocator(graphicsArchetype.MaxEntitiesPerCBufferBatch);
 
             int allocationBegin = (int)batchInfo.GPUMemoryAllocation.begin;
 
-            uint bindOffset = UseConstantBuffers
+            uint bindOffset = UseConstantBuffers && !m_UseTextureScene
                 ? (uint)allocationBegin
                 : 0;
-            uint bindWindowSize = UseConstantBuffers
+            uint bindWindowSize = UseConstantBuffers && ! m_UseTextureScene
                 ? (uint)MaxBytesPerCBuffer
                 : 0;
 
@@ -2651,7 +2700,7 @@ namespace Unity.Rendering
             for (int i = 1; i < numProperties; ++i)
                 overrideStreamBegin[i] = overrideStreamBegin[i - 1] + overrideSizes[i - 1];
 
-            int numMetadata = numProperties;
+            int numMetadata = numProperties + (m_UseTextureScene ? 1 : 0);
             var overrideMetadata = new NativeArray<MetadataValue>(numMetadata, Allocator.Temp);
 
             int metadataIndex = 0;
@@ -2665,9 +2714,19 @@ namespace Unity.Rendering
                 Debug.Log($"Property Allocation: Property: {NameIDFormatted(overrides[i].NameID)} Type: {TypeIndexFormatted(overrides[i].TypeIndex)} Metadata: {overrideMetadata[i].Value:x8} Allocation: {overrideStreamBegin[i]}");
 #endif
             }
-
-            var batchID = m_ThreadedBatchContext.AddBatch(overrideMetadata, m_GPUPersistentInstanceBufferHandle,
-                bindOffset, bindWindowSize);
+            BatchID batchID;
+            if (m_UseTextureScene)
+            {
+                int pageIdx = allocationBegin / m_TextureScenePageSize;
+                int bitCount = Ctz(m_TextureSceneList[pageIdx].width);
+                int vtfStridePacked = (bitCount & 0xFF) << 24;
+                overrideMetadata[metadataIndex] = CreateMetadataValue(sVtfStrideID, vtfStridePacked, false);
+#if UNITY_MINIGAME
+                batchID = m_BatchRendererGroup.AddBatch(overrideMetadata, m_GPUPersistentInstanceBufferHandle, bindOffset, bindWindowSize, m_TextureSceneList[pageIdx]);
+#endif
+            }
+            else
+                batchID = m_ThreadedBatchContext.AddBatch(overrideMetadata, m_GPUPersistentInstanceBufferHandle, bindOffset, bindWindowSize);
             int batchIndex = (int)batchID.value;
 
 #if DEBUG_LOG_BATCH_CREATION
@@ -2952,7 +3011,7 @@ namespace Unity.Rendering
             m_UpdateJobDependency = JobHandle.CombineDependencies(job, m_UpdateJobDependency);
         }
 
-        private void StartUpdate()
+        private void CheckGPUPersistentResize()
         {
 #if ENABLE_BATCH_OPTIMIZATION
             var persistentBytes = (ulong)(m_GPUPersistentAllocator.MaxBlockCount * MaxBytesPerCBuffer);
@@ -2961,37 +3020,61 @@ namespace Unity.Rendering
 #endif
             if (persistentBytes > (ulong)m_PersistentInstanceDataSize)
             {
-                while ((ulong)m_PersistentInstanceDataSize < persistentBytes)
+                if(m_UseTextureScene)
                 {
-                    m_PersistentInstanceDataSize *= 2;
-                }
+                    DecomposePowerOfTwo((int)m_TextureScenePageSize / 16, out int height, out int width);
+                    Texture2D textureScene = new Texture2D(width, height, TextureFormat.RGBAFloat, false);
+                    m_TextureScenePageSize = width * height * 16;
+                    m_PersistentInstanceDataSize += m_TextureScenePageSize;
 
-                if (m_PersistentInstanceDataSize > kGPUBufferSizeMax)
-                {
-                    m_PersistentInstanceDataSize = kGPUBufferSizeMax;
-                }
+                    var newSystemBuffer = new NativeArray<float4>(
+                   (int)m_PersistentInstanceDataSize / 16,
+                   Allocator.Persistent,
+                   NativeArrayOptions.ClearMemory);
 
-                if (persistentBytes > kGPUBufferSizeMax)
-                    Debug.LogError("Entities Graphics: Current loaded scenes need more than 1GiB of persistent GPU memory.");
+                    if (m_SystemMemoryBuffer.IsCreated)
+                    {
+                        NativeArray<float4>.Copy(m_SystemMemoryBuffer, newSystemBuffer, m_SystemMemoryBuffer.Length);
+                        m_SystemMemoryBuffer.Dispose();
+                    }
 
-                GraphicsBuffer newBuffer;
-                if (BatchRendererGroup.BufferTarget == BatchBufferTarget.ConstantBuffer)
-                {
-                    newBuffer = new GraphicsBuffer(
-                        GraphicsBuffer.Target.Constant,
-                        (int)m_PersistentInstanceDataSize / 16,
-                        16);
+                    m_TextureSceneList.Add(textureScene);
+
+                    m_SystemMemoryBuffer = newSystemBuffer;
+
+                    m_DirectUploader.Dispose();
+                    m_DirectUploader = new DirectUploader(null, m_SystemMemoryBuffer, m_PersistentInstanceDataSize, GetNativeTexturePtrs(m_TextureSceneList), m_TextureScenePageWidth, m_TextureScenePageHeight);
                 }
                 else
                 {
-                    newBuffer = new GraphicsBuffer(
-                        GraphicsBuffer.Target.Raw,
-                        (int)m_PersistentInstanceDataSize / 4,
-                        4);
-                }
+                    while ((ulong)m_PersistentInstanceDataSize < persistentBytes)
+                    {
+                        m_PersistentInstanceDataSize *= 2;
+                    }
 
-                if (m_UseDirectUpload)
-                {
+                    if (m_PersistentInstanceDataSize > kGPUBufferSizeMax)
+                    {
+                        m_PersistentInstanceDataSize = kGPUBufferSizeMax;
+                    }
+
+                    if (persistentBytes > kGPUBufferSizeMax)
+                        Debug.LogError("Entities Graphics: Current loaded scenes need more than 1GiB of persistent GPU memory.");
+
+                    GraphicsBuffer newBuffer;
+                    if (BatchRendererGroup.BufferTarget == BatchBufferTarget.ConstantBuffer)
+                    {
+                        newBuffer = new GraphicsBuffer(
+                            GraphicsBuffer.Target.Constant,
+                            (int)m_PersistentInstanceDataSize / 16,
+                            16);
+                    }
+                    else
+                    {
+                        newBuffer = new GraphicsBuffer(
+                            GraphicsBuffer.Target.Raw,
+                            (int)m_PersistentInstanceDataSize / 4,
+                            4);
+                    }
                     newBuffer.SetData(m_SystemMemoryBuffer, 0, 0, m_SystemMemoryBuffer.Length);
 
                     var newSystemBuffer = new NativeArray<float4>(
@@ -3008,25 +3091,19 @@ namespace Unity.Rendering
                     m_SystemMemoryBuffer = newSystemBuffer;
 
                     m_DirectUploader.Dispose();
-                    m_DirectUploader = new DirectUploader(newBuffer, m_SystemMemoryBuffer, m_PersistentInstanceDataSize);
+                    m_DirectUploader = new DirectUploader(newBuffer, m_SystemMemoryBuffer, m_PersistentInstanceDataSize, new NativeArray<IntPtr>());
+
+
+                    m_GPUPersistentInstanceBufferHandle = newBuffer.bufferHandle;
+                    UpdateBatchBufferHandles();
+
+                    if (m_GPUPersistentInstanceData != null)
+                        m_GPUPersistentInstanceData.Dispose();
+                    m_GPUPersistentInstanceData = newBuffer;
                 }
-                else
-                {
-
-                }
-
-                m_GPUPersistentInstanceBufferHandle = newBuffer.bufferHandle;
-                UpdateBatchBufferHandles();
-
-                if (m_GPUPersistentInstanceData != null)
-                    m_GPUPersistentInstanceData.Dispose();
-                m_GPUPersistentInstanceData = newBuffer;
+              
             }
 
-            if (!m_UseDirectUpload)
-            {
-
-            }
         }
 
         private void UpdateBatchBufferHandles()

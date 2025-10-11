@@ -64,6 +64,7 @@ Shader "Custom/SpriteEcs"
             #pragma vertex vert
             #pragma fragment frag
             #pragma multi_compile_instancing
+            #pragma multi_compile USE_VTF
             #pragma enable_d3d11_debug_symbols
 
             

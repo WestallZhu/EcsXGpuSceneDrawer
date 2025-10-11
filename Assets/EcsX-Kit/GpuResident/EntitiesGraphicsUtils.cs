@@ -45,25 +45,6 @@ namespace Unity.Rendering
             };
         }
 
-        private static bool CheckGLVersion()
-        {
-
-            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3)
-                return SystemInfo.supportsComputeShaders;
-
-            char[] delimiterChars = { ' ', '.' };
-            var arr = SystemInfo.graphicsDeviceVersion.Split(delimiterChars);
-            if (arr.Length >= 3)
-            {
-                var major = Int32.Parse(arr[1]);
-                var minor = Int32.Parse(arr[2]);
-
-                return major >= 4 && minor >= 3;
-            }
-
-            return false;
-        }
-
         static bool IsScriptableRenderPipelineUsed() => GraphicsSettings.currentRenderPipeline != null;
 
         public static bool IsEntitiesGraphicsSupportedOnSystem()
@@ -73,12 +54,8 @@ namespace Unity.Rendering
 
             var deviceType = SystemInfo.graphicsDeviceType;
 
-            bool isOpenGL = deviceType == GraphicsDeviceType.OpenGLCore ||
-                            deviceType == GraphicsDeviceType.OpenGLES3;
-
             if (deviceType == GraphicsDeviceType.Null ||
-                !SystemInfo.supportsComputeShaders ||
-                (isOpenGL && !CheckGLVersion()))
+                deviceType == GraphicsDeviceType.OpenGLES2)
                 return false;
 
             return true;

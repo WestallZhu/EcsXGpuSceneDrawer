@@ -1,14 +1,15 @@
-﻿using System;
+using System;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Burst;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
-#if UNITY_2022_2_OR_NEWER
 
+#if UNITY_2022_2_OR_NEWER
 namespace Unity.Rendering
 {
+
     internal enum OperationType : int
     {
         Upload = 0,
@@ -64,6 +65,7 @@ namespace Unity.Rendering
         public int BytesRequiredInUploadBuffer => (int)(ValueSizeBytes * Count);
     }
 
+
     [BurstCompile]
     internal unsafe struct DirectUploader : IDisposable
     {
@@ -72,7 +74,6 @@ namespace Unity.Rendering
             public int SourceOffset;
             public int DestinationOffset;
             public int SizeInFloat4;
-
             public int CompareTo(UploadRequest other) => DestinationOffset.CompareTo(other.DestinationOffset);
         }
 
@@ -80,83 +81,105 @@ namespace Unity.Rendering
         private NativeArray<float4> m_SystemBuffer;
         private NativeList<UploadRequest> m_PendingUploads;
 
+        // Windowing (ConstantBuffer or Texture page)
         private bool m_UseConstantBuffer;
-        private int m_WindowSizeInFloat4;
+        private int  m_WindowSizeInFloat4;
+
+        // Texture path
+        private NativeArray<IntPtr> m_TextureBuffer;
+        private int m_TextureWidth;
+        private int m_TextureHeight;
+
+        // Whether to enforce window boundary (true for CB/Textures; false for UAV buffer)
+        private bool m_EnforceWindowBoundary;
 
         private const int kBatchUploadThreshold = 8;
-        private const int kMaxMergeDistance = 64;
+        private const int kMaxMergeDistance     = 64;
+        private const int kBytesPerTexel        = 16; // float4
 
-        public bool UseConstantBuffer => m_UseConstantBuffer;
-        public int WindowSizeInFloat4 => m_WindowSizeInFloat4;
+        public bool UseConstantBuffer  => m_UseConstantBuffer;
+        public int  WindowSizeInFloat4 => m_WindowSizeInFloat4;
 
-        public DirectUploader(GraphicsBuffer gpuBuffer, NativeArray<float4> systemBuffer, long totalBufferSize)
+        public DirectUploader(
+            GraphicsBuffer gpuBuffer,
+            NativeArray<float4> systemBuffer,
+            long totalBufferBytes,
+            NativeArray<IntPtr> textureBuffer,
+            int texPageWidth = 0,
+            int texPageHeight = 0)
         {
-            m_GPUBuffer = gpuBuffer;
-            m_SystemBuffer = systemBuffer;
-            m_PendingUploads = new NativeList<UploadRequest>(128, Allocator.Persistent);
+            m_GPUBuffer            = gpuBuffer;
+            m_SystemBuffer         = systemBuffer;
+            m_PendingUploads       = new NativeList<UploadRequest>(128, Allocator.Persistent);
 
-            m_UseConstantBuffer = BatchRendererGroup.BufferTarget == BatchBufferTarget.ConstantBuffer;
+            m_TextureBuffer        = textureBuffer;
+            m_TextureWidth         = texPageWidth;
+            m_TextureHeight        = texPageHeight;
 
-            if (m_UseConstantBuffer)
+            m_UseConstantBuffer    = BatchRendererGroup.BufferTarget == BatchBufferTarget.ConstantBuffer;
+
+            bool hasTextures       = textureBuffer.IsCreated && textureBuffer.Length > 0;
+            if (hasTextures)
             {
-                int windowSizeInBytes = BatchRendererGroup.GetConstantBufferMaxWindowSize();
-                m_WindowSizeInFloat4 = windowSizeInBytes / 16;
-#if DEBUG_LOG_UPLOADS
-                Debug.Log($"ConstantBuffer mode: WindowSize={windowSizeInBytes} bytes ({m_WindowSizeInFloat4} float4s)");
-#endif
+                // One window == one texture page
+                m_WindowSizeInFloat4    = texPageWidth * texPageHeight;
+                m_EnforceWindowBoundary = true;
+            }
+            else if (m_UseConstantBuffer)
+            {
+                int windowSizeInBytes   = BatchRendererGroup.GetConstantBufferMaxWindowSize();
+                m_WindowSizeInFloat4    = windowSizeInBytes / 16;
+                m_EnforceWindowBoundary = true;
             }
             else
             {
-                m_WindowSizeInFloat4 = (int)(totalBufferSize / 16);
+                // UAV buffer: whole buffer is one big "window"
+                m_WindowSizeInFloat4    = (int)(totalBufferBytes / 16);
+                m_EnforceWindowBoundary = false;
             }
         }
 
         public NativeList<UploadRequest>.ParallelWriter AsParallelWriter() => m_PendingUploads.AsParallelWriter();
+        public void EnsureCapacity(int capacity) => m_PendingUploads.SetCapacity(capacity);
 
-        public void EnsureCapacity(int capacity)
-        {
-            m_PendingUploads.SetCapacity(capacity);
-        }
 
         public void QueueUpload(int sourceOffsetInFloat4, int destOffsetInFloat4, int sizeInFloat4)
         {
             if (sizeInFloat4 <= 0) return;
 
-            if (m_UseConstantBuffer)
-            {
+#if UNITY_COLLECTIONS_CHECKS || DEVELOPMENT_BUILD
+            if (sourceOffsetInFloat4 != destOffsetInFloat4)
+                Debug.LogWarning("DirectUploader assumes Src==Dst; forcing SourceOffset=DestinationOffset.");
+#endif
 
-                QueueUploadWithWindowSplit(sourceOffsetInFloat4, destOffsetInFloat4, sizeInFloat4);
-            }
+            if (m_EnforceWindowBoundary)
+                QueueUploadWithWindowSplit_DstOnly(destOffsetInFloat4, sizeInFloat4);
             else
-            {
-
                 m_PendingUploads.Add(new UploadRequest
                 {
-                    SourceOffset = sourceOffsetInFloat4,
+                    SourceOffset      = destOffsetInFloat4,   // Src == Dst
                     DestinationOffset = destOffsetInFloat4,
-                    SizeInFloat4 = sizeInFloat4
+                    SizeInFloat4      = sizeInFloat4
                 });
-            }
         }
 
-        private void QueueUploadWithWindowSplit(int sourceOffset, int destOffset, int size)
+        private void QueueUploadWithWindowSplit_DstOnly(int destOffset, int size)
         {
             while (size > 0)
             {
-                int offsetInWindow = destOffset % m_WindowSizeInFloat4;
+                int offsetInWindow    = destOffset % m_WindowSizeInFloat4;
                 int remainingInWindow = m_WindowSizeInFloat4 - offsetInWindow;
-                int chunkSize = math.min(size, remainingInWindow);
+                int chunk             = math.min(size, remainingInWindow);
 
                 m_PendingUploads.Add(new UploadRequest
                 {
-                    SourceOffset = sourceOffset,
+                    SourceOffset      = destOffset, // Src == Dst
                     DestinationOffset = destOffset,
-                    SizeInFloat4 = chunkSize
+                    SizeInFloat4      = chunk
                 });
 
-                sourceOffset += chunkSize;
-                destOffset += chunkSize;
-                size -= chunkSize;
+                destOffset += chunk;
+                size       -= chunk;
             }
         }
 
@@ -164,137 +187,137 @@ namespace Unity.Rendering
         {
             if (m_PendingUploads.Length == 0) return;
 
+            // Sort by destination so merges are correct
             m_PendingUploads.Sort();
 
-            if (m_PendingUploads.Length >= kBatchUploadThreshold)
+            bool hasTextures = m_TextureBuffer.IsCreated && m_TextureBuffer.Length > 0;
+            if (hasTextures)
             {
-                ExecuteOptimizedBatch();
+                ExecuteTextureUploadsMerged();
             }
             else
             {
-                ExecuteSimpleBatch();
+                if (m_GPUBuffer == null) return;
+
+                if (m_PendingUploads.Length >= kBatchUploadThreshold)
+                    ExecuteOptimizedBatch();
+                else
+                    ExecuteSimpleBatch();
             }
 
             m_PendingUploads.Clear();
         }
 
+        // ========= UAV / GraphicsBuffer path =========
         private void ExecuteOptimizedBatch()
         {
-            var mergedUploads = MergeConsecutiveUploadsOptimized();
-
-            foreach (var upload in mergedUploads)
+            var merged = MergeByGapWithinWindow(checkWindow: m_EnforceWindowBoundary);
+            for (int i = 0; i < merged.Length; ++i)
             {
-                m_GPUBuffer.SetData(
-                    m_SystemBuffer,
-                    upload.SourceOffset,
-                    upload.DestinationOffset,
-                    upload.SizeInFloat4);
+                var u = merged[i];
+                // Mirror model: copy [dst, dst+len) from system buffer into GPU buffer
+                m_GPUBuffer.SetData(m_SystemBuffer, u.DestinationOffset, u.DestinationOffset, u.SizeInFloat4);
             }
-
-            mergedUploads.Dispose();
+            merged.Dispose();
         }
 
         private void ExecuteSimpleBatch()
         {
-            for (int i = 0; i < m_PendingUploads.Length; i++)
+            for (int i = 0; i < m_PendingUploads.Length; ++i)
             {
-                var upload = m_PendingUploads[i];
-                m_GPUBuffer.SetData(
-                    m_SystemBuffer,
-                    upload.SourceOffset,
-                    upload.DestinationOffset,
-                    upload.SizeInFloat4);
+                var u = m_PendingUploads[i];
+                m_GPUBuffer.SetData(m_SystemBuffer, u.DestinationOffset, u.DestinationOffset, u.SizeInFloat4);
             }
         }
 
-        private NativeList<UploadRequest> MergeConsecutiveUploadsOptimized()
+        private NativeList<UploadRequest> MergeByGapWithinWindow(bool checkWindow)
         {
             var merged = new NativeList<UploadRequest>(m_PendingUploads.Length, Allocator.Temp);
             if (m_PendingUploads.Length == 0) return merged;
 
-            var current = m_PendingUploads[0];
+            var run = m_PendingUploads[0];
+            int runEnd = run.DestinationOffset + run.SizeInFloat4;
 
-            for (int i = 1; i < m_PendingUploads.Length; i++)
+            for (int i = 1; i < m_PendingUploads.Length; ++i)
             {
                 var next = m_PendingUploads[i];
+                int nextEnd = next.DestinationOffset + next.SizeInFloat4;
 
-                int gapSize = next.DestinationOffset - (current.DestinationOffset + current.SizeInFloat4);
-                bool isConsecutive = gapSize == 0;
-                bool isCloseEnough = gapSize > 0 && gapSize <= kMaxMergeDistance;
+                bool sameWindow = !checkWindow ||
+                    (run.DestinationOffset / m_WindowSizeInFloat4) == ((nextEnd - 1) / m_WindowSizeInFloat4);
 
-                bool canMerge = (isConsecutive || isCloseEnough) &&
-                               (current.SourceOffset + current.SizeInFloat4 == next.SourceOffset || isCloseEnough);
-
-                if (canMerge && m_UseConstantBuffer)
+                int gap = next.DestinationOffset - runEnd;  // <0 overlap, 0 adjacent, >0 hole
+                if (sameWindow && gap <= kMaxMergeDistance)
                 {
-                    int startWindow = current.DestinationOffset / m_WindowSizeInFloat4;
-                    int endWindow = (next.DestinationOffset + next.SizeInFloat4 - 1) / m_WindowSizeInFloat4;
-                    canMerge = (startWindow == endWindow);
-                }
-
-                if (canMerge)
-                {
-
-                    current.SizeInFloat4 = (next.DestinationOffset + next.SizeInFloat4) - current.DestinationOffset;
+                    runEnd = math.max(runEnd, nextEnd);
+                    run.SizeInFloat4 = runEnd - run.DestinationOffset;
                 }
                 else
                 {
-                    merged.Add(current);
-                    current = next;
+                    merged.Add(run);
+                    run = next;
+                    runEnd = nextEnd;
                 }
             }
 
-            merged.Add(current);
+            merged.Add(run);
             return merged;
         }
 
-        private NativeList<UploadRequest> MergeConsecutiveUploads()
+        private unsafe void ExecuteTextureUploadsMerged()
         {
-            var merged = new NativeList<UploadRequest>(m_PendingUploads.Length, Allocator.Temp);
-            if (m_PendingUploads.Length == 0) return merged;
+            var merged = MergeByGapWithinWindow(checkWindow: true);
 
-            var current = m_PendingUploads[0];
 
-            for (int i = 1; i < m_PendingUploads.Length; i++)
+            byte* basePtr = (byte*)NativeArrayUnsafeUtility.GetUnsafePtr(m_SystemBuffer);
+            int   winSize = m_WindowSizeInFloat4;
+
+            for (int i = 0; i < merged.Length; ++i)
             {
-                var next = m_PendingUploads[i];
+                int dst  = merged[i].DestinationOffset;
+                int left = merged[i].SizeInFloat4;
 
-                bool canMerge = (current.DestinationOffset + current.SizeInFloat4 == next.DestinationOffset) &&
-                               (current.SourceOffset + current.SizeInFloat4 == next.SourceOffset);
+                while (left > 0)
+                {
+                    int winIdx       = dst / winSize;
+                    int local        = dst % winSize;
+                    int canThisWin   = math.min(left, winSize - local);
 
-                if (canMerge && m_UseConstantBuffer)
-                {
-                    int startWindow = current.DestinationOffset / m_WindowSizeInFloat4;
-                    int endWindow = (next.DestinationOffset + next.SizeInFloat4 - 1) / m_WindowSizeInFloat4;
-                    canMerge = (startWindow == endWindow);
-                }
+                    // Expand to full rows in this window
+                    int startRow         =  local / m_TextureWidth;
+                    int endElemExclusive =  local + canThisWin;
+                    int endRowExclusive  = (endElemExclusive + m_TextureWidth - 1) / m_TextureWidth; // ceildiv
+                    int rows             =  endRowExclusive - startRow;
 
-                if (canMerge)
-                {
-                    current.SizeInFloat4 += next.SizeInFloat4;
-                }
-                else
-                {
-                    merged.Add(current);
-                    current = next;
+                    // Pointer to the first pixel of startRow (xoffset==0)
+                    int rowBaseFloat4    = winIdx * winSize + startRow * m_TextureWidth;
+                    IntPtr texPtr        = m_TextureBuffer[winIdx];
+                    IntPtr dataPtr       = (IntPtr)(basePtr + (long)rowBaseFloat4 * kBytesPerTexel);
+
+#if UNITY_COLLECTIONS_CHECKS || DEVELOPMENT_BUILD
+                    if (winIdx < 0 || winIdx >= m_TextureBuffer.Length)
+                        Debug.LogError($"Texture index {winIdx} out of range.");
+                    if (startRow < 0 || rows <= 0 || (startRow + rows) > m_TextureHeight)
+                        Debug.LogError("Row range out of texture bounds.");
+                    if ((rowBaseFloat4 + rows * m_TextureWidth) > m_SystemBuffer.Length)
+                        Debug.LogError("SystemBuffer out of range for texture upload.");
+#endif
+                    // xoffset = 0; width = texture width; height = row count
+                    RenderingPluginAPI.UpdateTexture2DSub(
+                        texPtr,
+                        0,
+                        startRow,
+                        m_TextureWidth,
+                        rows,
+                        kBytesPerTexel,
+                        dataPtr);
+
+                    dst  += canThisWin;
+                    left -= canThisWin;
                 }
             }
 
-            merged.Add(current);
-            return merged;
-        }
-
-        public void GetStats(out int uploadCount, out int totalFloat4s, out int windowCount, out float avgUploadSize)
-        {
-            uploadCount = m_PendingUploads.Length;
-            totalFloat4s = 0;
-            foreach (var upload in m_PendingUploads)
-                totalFloat4s += upload.SizeInFloat4;
-
-            windowCount = m_UseConstantBuffer ?
-                (int)((long)m_SystemBuffer.Length * 16 + BatchRendererGroup.GetConstantBufferMaxWindowSize() - 1) / BatchRendererGroup.GetConstantBufferMaxWindowSize() : 1;
-
-            avgUploadSize = uploadCount > 0 ? (float)totalFloat4s / uploadCount : 0f;
+            merged.Dispose();
         }
 
         public void Dispose()
@@ -304,5 +327,4 @@ namespace Unity.Rendering
         }
     }
 }
-
 #endif
