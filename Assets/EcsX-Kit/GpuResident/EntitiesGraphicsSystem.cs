@@ -674,7 +674,7 @@ namespace Unity.Rendering
         protected override void OnCreate()
         {
 
-#if UNITY_MINIGAME
+#if UNITY_WEBGL && TUANJIE_1_6_OR_NEWER
             m_UseTextureScene = true;
             m_TextureSceneList = new List<Texture2D>();
 #endif
@@ -2721,7 +2721,7 @@ namespace Unity.Rendering
                 int bitCount = Ctz(m_TextureSceneList[pageIdx].width);
                 int vtfStridePacked = (bitCount & 0xFF) << 24;
                 overrideMetadata[metadataIndex] = CreateMetadataValue(sVtfStrideID, vtfStridePacked, false);
-#if UNITY_MINIGAME
+#if UNITY_WEBGL && TUANJIE_1_6_OR_NEWER
                 batchID = m_BatchRendererGroup.AddBatch(overrideMetadata, m_GPUPersistentInstanceBufferHandle, bindOffset, bindWindowSize, m_TextureSceneList[pageIdx]);
 #else
                 batchID = default;
