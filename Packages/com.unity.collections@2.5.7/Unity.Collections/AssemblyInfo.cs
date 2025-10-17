@@ -21,4 +21,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Unity.Scenes.Editor")]
 [assembly: InternalsVisibleTo("Samples.GridPath.Tests")]
 [assembly: InternalsVisibleTo("Unity.Entities.PerformanceTests")]
-[assembly: InternalsVisibleTo("Entities.Hybrid")]
+[assembly: InternalsVisibleTo("EcsX-Kit")]

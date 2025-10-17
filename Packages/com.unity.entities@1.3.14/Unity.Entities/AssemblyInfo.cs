@@ -15,7 +15,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Unity.Entities.Graphics.Tests")]
 [assembly: InternalsVisibleTo("Unity.Entities.Graphics.Tests.CodeGen")]
 [assembly: InternalsVisibleTo("Unity.Entities.Hybrid")]
-[assembly: InternalsVisibleTo("Entities.Hybrid")]
+[assembly: InternalsVisibleTo("EcsX-Kit")]
 [assembly: InternalsVisibleTo("Unity.Entities.Hybrid.CodeGen")]
 [assembly: InternalsVisibleTo("Unity.Entities.Hybrid.CodeGen.Tests")]
 [assembly: InternalsVisibleTo("Unity.Entities.Hybrid.EndToEnd.Tests")]
