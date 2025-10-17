@@ -677,6 +677,9 @@ namespace Unity.Rendering
 #if UNITY_WEBGL && TUANJIE_1_6_OR_NEWER
             m_UseTextureScene = true;
             m_TextureSceneList = new List<Texture2D>();
+#if !UNITY_EDITOR
+            RenderingPluginAPI.RegisterPlugin();
+#endif
 #endif
 
             if (!EntitiesGraphicsEnabled)
@@ -1545,7 +1548,7 @@ namespace Unity.Rendering
             return default;
 #endif
         }
-
+#if !(UNITY_WEBGL && TUANJIE_1_6_OR_NEWER)
         private JobHandle OnPerformCulling(BatchRendererGroup rendererGroup, BatchCullingContext cullingContext, BatchCullingOutput cullingOutput, IntPtr userContext)
         {
             Profiler.BeginSample("OnPerformCulling");
@@ -1839,7 +1842,7 @@ namespace Unity.Rendering
             Profiler.EndSample();
             return m_CullingJobDependency;
         }
-
+#endif
         private void DebugDrawCommands(JobHandle drawCommandsDependency, BatchCullingOutput cullingOutput)
         {
             drawCommandsDependency.Complete();
@@ -2033,15 +2036,15 @@ namespace Unity.Rendering
             disposeJobHandles[numDisposeJobHandles++] = newChunks.Dispose(entitiesGraphicsCompleted);
             disposeJobHandles[numDisposeJobHandles++] = numNewChunksArray.Dispose(entitiesGraphicsCompleted);
 
-            var drawCommandFlagsUpdated = new UpdateDrawCommandFlagsJob
-            {
-                LocalToWorld = GetComponentTypeHandle<LocalToWorld>(true),
-                RenderFilterSettings = GetSharedComponentTypeHandle<RenderFilterSettings>(),
-                EntitiesGraphicsChunkInfo = GetComponentTypeHandle<EntitiesGraphicsChunkInfo>(),
-                FilterSettings = m_FilterSettings,
-                DefaultFilterSettings = MakeFilterSettings(RenderFilterSettings.Default),
-            }.ScheduleParallel(m_ChangedTransformQuery, entitiesGraphicsCompleted);
-            DidScheduleUpdateJob(drawCommandFlagsUpdated);
+            //var drawCommandFlagsUpdated = new UpdateDrawCommandFlagsJob
+            //{
+            //    LocalToWorld = GetComponentTypeHandle<LocalToWorld>(true),
+            //    RenderFilterSettings = GetSharedComponentTypeHandle<RenderFilterSettings>(),
+            //    EntitiesGraphicsChunkInfo = GetComponentTypeHandle<EntitiesGraphicsChunkInfo>(),
+            //    FilterSettings = m_FilterSettings,
+            //    DefaultFilterSettings = MakeFilterSettings(RenderFilterSettings.Default),
+            //}.ScheduleParallel(m_ChangedTransformQuery, entitiesGraphicsCompleted);
+            //DidScheduleUpdateJob(drawCommandFlagsUpdated);
 
             if (m_UseDirectUpload)
             {
@@ -2098,10 +2101,11 @@ namespace Unity.Rendering
 
             m_ReleaseDependency = JobHandle.CombineDependencies(
                     disposeJobHandles.Slice(0, numDisposeJobHandles));
-            JobHandle outputDeps = JobHandle.CombineDependencies(
+            JobHandle outputDeps = m_ReleaseDependency;
+            //JobHandle.CombineDependencies(
 
-                drawCommandFlagsUpdated,
-                m_ReleaseDependency);
+            //    drawCommandFlagsUpdated,
+            //    m_ReleaseDependency);
 
             disposeJobHandles.Dispose();
 
@@ -2122,22 +2126,6 @@ namespace Unity.Rendering
             {
                 var operation = Operations[index];
 
-                if (operation.Kind == GpuUploadOperation.UploadOperationKind.SOAMatrixUpload3x4)
-                {
-                    var srcLocal = (byte*)operation.Src;
-                    var dstLocal = (byte*)SystemMemoryPtr + operation.DstOffset;
-
-                    for (int k = 0; k < operation.Size; ++k)
-                    {
-                        for (int j = 0; j < 4; ++j)
-                        {
-                            UnsafeUtility.MemCpy(dstLocal, srcLocal, 12);
-                            dstLocal += 12;
-                            srcLocal += 16;
-                        }
-                    }
-                }
-                else
                 {
                     UnsafeUtility.MemCpy((byte*)SystemMemoryPtr + operation.DstOffset, operation.Src, operation.Size);
                 }
@@ -2205,6 +2193,9 @@ namespace Unity.Rendering
 
             m_DirectUploader.ExecuteUploads();
             m_ValueBlits.Clear();
+#if UNITY_WEBGL && TUANJIE_1_6_OR_NEWER
+            GL.IssuePluginEvent(RenderingPluginAPI.GetRenderEventFunc(), 3);
+#endif
         }
 
         private void ComputeUploadSizeRequirements(
