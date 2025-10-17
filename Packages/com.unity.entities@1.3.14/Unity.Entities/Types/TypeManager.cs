@@ -2904,6 +2904,9 @@ namespace Unity.Entities
             if (assemblyName.Contains(kUnityEngineAssemblyName))
                 referencesUnityEngine = true;
 
+            if (assemblyName.Contains("EcsX-Kit"))
+                referencesUnityEngine = true;
+
             var referencedAssemblies = assembly.GetReferencedAssemblies();
             foreach (var referencedAssembly in referencedAssemblies)
             {
