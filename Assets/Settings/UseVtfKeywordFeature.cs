@@ -30,7 +30,7 @@ public class UseVtfKeywordFeature : ScriptableRendererFeature
             var cmd = CommandBufferPool.Get("Toggle USE_VTF");
             using (new ProfilingScope(cmd, s_Sampler))
             {
-#if UNITY_MINIGAME
+#if UNITY_WEBGL && TUANJIE_1_6_OR_NEWER
                 cmd.EnableKeyword(kUseVtfKeyword);
 #else
                 cmd.DisableKeyword(kUseVtfKeyword);

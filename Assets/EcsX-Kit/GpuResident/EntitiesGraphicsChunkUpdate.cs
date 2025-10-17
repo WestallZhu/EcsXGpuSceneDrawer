@@ -121,22 +121,6 @@ namespace Unity.Rendering
                         int sizeBytes = (int)((uint)chunk.Count * (uint)chunkProperty.ValueSizeBytesCPU);
                         var srcPtr = src.GetUnsafeReadOnlyPtr();
                         var dstOffset = chunkProperty.GPUDataBegin;
-                        if (isLocalToWorld)
-                        {
-                            var numMatrices = sizeBytes / sizeof(float4x4);
-                            AddMatrixUpload(
-                                srcPtr,
-                                numMatrices,
-                                dstOffset,
-                                isLocalToWorld ? dstOffsetWorldToLocal : dstOffsetPrevWorldToLocal,
-                                (chunkProperty.ValueSizeBytesCPU == 4 * 4 * 3)
-                                    ? MatrixType.MatrixType3x4
-                                    : MatrixType.MatrixType4x4,
-                                (chunkProperty.ValueSizeBytesGPU == 4 * 4 * 3)
-                                    ? MatrixType.MatrixType3x4
-                                    : MatrixType.MatrixType4x4);
-                        }
-                        else
                         {
                             AddUpload(
                                 srcPtr,
@@ -161,28 +145,6 @@ namespace Unity.Rendering
                 DstOffset = dstOffset,
                 DstOffsetInverse = -1,
                 Size = sizeBytes,
-            });
-
-        }
-
-        private unsafe void AddMatrixUpload(
-            void* srcPtr,
-            int numMatrices,
-            int dstOffset,
-            int dstOffsetInverse,
-            MatrixType matrixTypeCpu,
-            MatrixType matrixTypeGpu)
-        {
-            GpuUploadOperationsWriter.AddNoResize(new GpuUploadOperation
-            {
-                Kind = (matrixTypeGpu == MatrixType.MatrixType3x4)
-                        ? GpuUploadOperation.UploadOperationKind.SOAMatrixUpload3x4
-                        : GpuUploadOperation.UploadOperationKind.SOAMatrixUpload4x4,
-                SrcMatrixType = matrixTypeCpu,
-                Src = srcPtr,
-                DstOffset = dstOffset,
-                DstOffsetInverse = dstOffsetInverse,
-                Size = numMatrices,
             });
 
         }

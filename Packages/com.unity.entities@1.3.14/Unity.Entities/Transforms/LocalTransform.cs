@@ -6,7 +6,6 @@ using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities;
 using Unity.Mathematics;
-using Unity.Properties;
 
 namespace Unity.Entities
 {
@@ -320,13 +319,13 @@ namespace Unity.Entities
         /// Gets the float4x4 equivalent of this transform.
         /// </summary>
         /// <returns>The float4x4 matrix.</returns>
-        public float4x4 ToMatrix() => float4x4.TRS(Position, Rotation, Scale);
+        public float3x4 ToMatrix() => mathEx.TRS(Position, Rotation, Scale);
 
         /// <summary>
         /// Gets the float4x4 equivalent of the inverse of this transform.
         /// </summary>
         /// <returns>The inverse float4x4 matrix.</returns>
-        public float4x4 ToInverseMatrix() => Inverse().ToMatrix();
+        public float3x4 ToInverseMatrix() => Inverse().ToMatrix();
 
         /// <summary>
         /// Gets an identical transform with a new position value.

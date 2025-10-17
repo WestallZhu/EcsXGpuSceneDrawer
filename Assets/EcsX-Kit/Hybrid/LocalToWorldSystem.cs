@@ -51,13 +51,13 @@ namespace Unity.Entities
 
             public uint LastSystemVersion;
 
-            void ChildLocalToWorldFromTransformMatrix(in float4x4 parentLocalToWorld, Entity childEntity, bool updateChildrenTransform)
+            void ChildLocalToWorldFromTransformMatrix(in float3x4 parentLocalToWorld, Entity childEntity, bool updateChildrenTransform)
             {
 
                 updateChildrenTransform = updateChildrenTransform
                                           || LocalTransformLookupRO.DidChange(childEntity, LastSystemVersion);
 
-                float4x4 localToWorld;
+                float3x4 localToWorld;
 
                 bool hasChildBuffer = ChildLookupRO.TryGetBuffer(childEntity, out DynamicBuffer<LinkedEntityGroup> children);
 
@@ -65,7 +65,7 @@ namespace Unity.Entities
                 {
 
                     var localTransform = LocalTransformLookupRO[childEntity];
-                    localToWorld = math.mul(parentLocalToWorld, localTransform.ToMatrix());
+                    localToWorld = mathEx.mul(parentLocalToWorld, localTransform.ToMatrix());
                     LocalToWorldLookupRW[childEntity] = new LocalToWorld { Value = localToWorld };
 
                     if (hasChildBuffer)
@@ -95,7 +95,7 @@ namespace Unity.Entities
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            void ChildLocalToWorldFromTransformMatrixNoRecursion(in float4x4 parentLocalToWorld, Entity childEntity, bool updateChildrenTransform)
+            void ChildLocalToWorldFromTransformMatrixNoRecursion(in float3x4 parentLocalToWorld, Entity childEntity, bool updateChildrenTransform)
             {
 
                 updateChildrenTransform = updateChildrenTransform
@@ -103,10 +103,10 @@ namespace Unity.Entities
 
                 if (updateChildrenTransform)
                 {
-                    float4x4 localToWorld;
+                    float3x4 localToWorld;
 
                     var localTransform = LocalTransformLookupRO[childEntity];
-                    localToWorld = math.mul(parentLocalToWorld, localTransform.ToMatrix());
+                    localToWorld = mathEx.mul(parentLocalToWorld, localTransform.ToMatrix());
                     LocalToWorldLookupRW[childEntity] = new LocalToWorld { Value = localToWorld };
                 }
             }
@@ -118,7 +118,7 @@ namespace Unity.Entities
                 {
                     bool updateChildrenTransform = ChildLookupRO.DidChange(root, LastSystemVersion) ||
                                                    LocalToWorldLookupRW.DidChange(root, LastSystemVersion);
-                    float4x4 localToWorldMatrix = LocalToWorldLookupRW[root].Value;
+                    float3x4 localToWorldMatrix = LocalToWorldLookupRW[root].Value;
                     for (int j = 1, childCount = children.Length; j < childCount; j++)
                     {
                         ChildLocalToWorldFromTransformMatrixNoRecursion(localToWorldMatrix, children[j].Value, updateChildrenTransform);

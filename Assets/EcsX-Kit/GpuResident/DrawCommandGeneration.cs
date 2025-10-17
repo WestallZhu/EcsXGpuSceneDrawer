@@ -1893,7 +1893,7 @@ namespace Unity.Rendering
             for (int i = 0; i < numStructs; ++i)
             {
                 var visibility = *header->Element(i);
-                var transforms = (float4x4*) (*transformHeader->Element(i));
+                var transforms = (float3x4*) (*transformHeader->Element(i));
                 int numInstances = ExpandVisibilityWithPositions(
                     visibleInstances + instanceOffset,
                     sortingPositions + positionOffset,
@@ -1934,7 +1934,7 @@ namespace Unity.Rendering
             int* outputInstances,
             float3* outputSortingPosition,
             DrawCommandVisibility visibility,
-            float4x4* transforms)
+            float3x4* transforms)
         {
             int numInstances = 0;
             int startIndex = visibility.ChunkStartIndex;
@@ -1949,14 +1949,9 @@ namespace Unity.Rendering
                     qword ^= mask;
                     int instanceIndex = (i << 6) + bitIndex;
 
-                    var instanceTransform = new LocalToWorld
-                    {
-                        Value = transforms[instanceIndex],
-                    };
-
                     int visibilityIndex = startIndex + instanceIndex;
                     outputInstances[numInstances] = visibilityIndex;
-                    outputSortingPosition[numInstances] = instanceTransform.Position;
+                    outputSortingPosition[numInstances] = transforms->c3;
 
                     ++numInstances;
                 }

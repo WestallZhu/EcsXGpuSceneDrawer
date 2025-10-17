@@ -42,7 +42,7 @@ namespace Unity.Rendering
         public byte ForceLowLODPrevious;
 
         public ChunkInstanceLodEnabled InstanceLodEnableds;
-        public fixed ulong FlippedWinding[2];
+        //public fixed ulong FlippedWinding[2];
     }
 
     public struct EntitiesGraphicsBatchPartition : ISharedComponentData

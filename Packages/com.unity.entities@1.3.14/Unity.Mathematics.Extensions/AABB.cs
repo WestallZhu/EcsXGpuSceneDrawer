@@ -84,6 +84,14 @@ namespace Unity.Mathematics
             return transformed;
         }
 
+        public static AABB Transform(float3x4 transform, AABB localBounds)
+        {
+            AABB transformed;
+            transformed.Extents = RotateExtents(localBounds.Extents, transform.c0.xyz, transform.c1.xyz, transform.c2.xyz);
+            transformed.Center = mathEx.transform(transform, localBounds.Center);
+            return transformed;
+        }
+
         /// <summary>
         /// Determines the squared distance from a point to the nearest point to it that is contained by an AABB.
         /// </summary>
