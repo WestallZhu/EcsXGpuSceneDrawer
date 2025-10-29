@@ -31,6 +31,7 @@ namespace Unity.Rendering
                 Cursors = new UnsafeList<int>(math.max(16, cap), h, NativeArrayOptions.ClearMemory);
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int AddOrGet(ref DrawCommandSettings s)
             {
                 s.ComputeHashCode();
@@ -52,9 +53,23 @@ namespace Unity.Rendering
             }
         }
 
+        private struct ChunkKEntry
+        {
+            public ushort K;
+            public ushort Count;
+            public ushort SubMesh;
+            public int Bin;
+        }
+        private struct ChunkEntriesIndex
+        {
+            public int Start;
+            public int Length;
+            public int SingleBin;
+        }
+
         private JobHandle OnPerformCulling(BatchRendererGroup rg, BatchCullingContext ctx, BatchCullingOutput output, IntPtr userCtx)
         {
-            Profiler.BeginSample("OnPerformCulling_ST_NoBitmap");
+            Profiler.BeginSample("OnPerformCulling_ST");
 
             if (ctx.projectionType == BatchCullingProjectionType.Orthographic)
             {
@@ -77,7 +92,7 @@ namespace Unity.Rendering
 
             var brgMap = World.GetExistingSystemManaged<RegisterMaterialsAndMeshesSystem>()?.BRGRenderMeshArrays
                          ?? new NativeParallelHashMap<int, BRGRenderMeshArray>();
-
+            
             var chunkVisible = new NativeArray<byte>(chunks.Length, Allocator.Temp, NativeArrayOptions.ClearMemory);
 
             var split = ctx.cullingSplits[0];
@@ -86,6 +101,10 @@ namespace Unity.Rendering
             var bins = new STBins();
             bins.Init(m_ThreadLocalAllocators.GeneralAllocator, chunkCount * 2);
             int totalInstances = 0;
+
+            var entries = new UnsafeList<ChunkKEntry>(math.max(256, chunkCount * 4),
+                m_ThreadLocalAllocators.GeneralAllocator->Handle, NativeArrayOptions.UninitializedMemory);
+            var chunkEntries = new NativeArray<ChunkEntriesIndex>(chunks.Length, Allocator.Temp, NativeArrayOptions.ClearMemory);
 
             for (int c = 0; c < chunks.Length; ++c)
             {
@@ -102,9 +121,11 @@ namespace Unity.Rendering
                     if (chunkSimpleLod.Value != m_SimpleChunkLOD) continue;
                 }
 
+                int filterIndexLM = ch.GetSharedComponentIndex(hFilter);
+
                 chunkVisible[c] = 1;
 
-                int filterIndex = ch.GetSharedComponentIndex(hFilter);
+                int filterIndex = filterIndexLM;
                 int sortingOrder = m_SortingOrders.TryGetValue(filterIndex, out var so) ? so : 0;
                 var mmis = ch.GetNativeArray(ref hMMI);
                 int len = mmis.Length;
@@ -137,13 +158,15 @@ namespace Unity.Rendering
                     int b0 = bins.AddOrGet(ref s0);
                     bins.Counts[b0] += len;
                     totalInstances += len;
+                    chunkEntries[c] = new ChunkEntriesIndex { Start = entries.Length, Length = 0, SingleBin = b0 };
                     continue;
                 }
 
                 int count = materialsCount * meshesCount;
                 int* counts = stackalloc int[count];
                 ushort* submesh = stackalloc ushort[count];
-                for (int k = 0; k < count; ++k) submesh[k] = 0xFFFF;
+                UnsafeUtility.MemClear(counts, count * sizeof(int));
+                UnsafeUtility.MemSet(submesh, 0xFF, count * sizeof(ushort));
 
                 for (int i = 0; i < len; ++i)
                 {
@@ -155,6 +178,7 @@ namespace Unity.Rendering
                     if (++counts[k] == 1) submesh[k] = (ushort)mmi.SubMesh;
                 }
 
+                int start = entries.Length;
                 for (int k = 0; k < count; ++k)
                 {
                     int n = counts[k];
@@ -176,7 +200,18 @@ namespace Unity.Rendering
                     int b = bins.AddOrGet(ref s);
                     bins.Counts[b] += n;
                     totalInstances += n;
+
+                    entries.Add(new ChunkKEntry
+                    {
+                        K = (ushort)k,
+                        Count = (ushort)n,
+                        SubMesh = submesh[k],
+                        Bin = b
+                    });
                 }
+
+                int length = entries.Length - start;
+                chunkEntries[c] = new ChunkEntriesIndex { Start = start, Length = length, SingleBin = -1 };
             }
 
             int binCount = bins.Keys.Length;
@@ -196,12 +231,11 @@ namespace Unity.Rendering
             ref BatchCullingOutputDrawCommands out0 = ref *(BatchCullingOutputDrawCommands*)output.drawCommands.GetUnsafePtr();
             out0.visibleInstanceCount = totalInstances;
             out0.visibleInstances = totalInstances > 0 ? ChunkDrawCommandOutput.Malloc<int>(totalInstances) : null;
-            out0.instanceSortingPositionFloatCount = 0; out0.instanceSortingPositions = null;
+            out0.instanceSortingPositionFloatCount = 0; 
+            out0.instanceSortingPositions = null;
             out0.drawCommandCount = commandsNeeded;
             out0.drawCommands = commandsNeeded > 0 ? ChunkDrawCommandOutput.Malloc<BatchDrawCommand>(commandsNeeded) : null;
             out0.drawCommandPickingInstanceIDs = null;
-            out0.drawRangeCount = commandsNeeded;
-            out0.drawRanges = commandsNeeded > 0 ? ChunkDrawCommandOutput.Malloc<BatchDrawRange>(commandsNeeded) : null;
 
             int running = 0;
             for (int i = 0; i < binCount; ++i)
@@ -219,16 +253,11 @@ namespace Unity.Rendering
 
                 var ch = chunks[c];
                 var info = ch.GetChunkComponentData(ref hInfo);
-
-                int filterIndex = ch.GetSharedComponentIndex(hFilter);
-                int sortingOrder = m_SortingOrders.TryGetValue(filterIndex, out var so) ? so : 0;
                 var mmis = ch.GetNativeArray(ref hMMI);
                 int len = mmis.Length;
                 if (len == 0) continue;
 
                 int chunkStart = info.CullingData.ChunkOffsetInBatch;
-                int batchIndex = info.BatchIndex;
-                var batchID = new BatchID { value = (uint)batchIndex };
 
                 BRGRenderMeshArray brg = default;
                 int rmaIndex = ch.GetSharedComponentIndex(hRMA);
@@ -237,93 +266,88 @@ namespace Unity.Rendering
                 int meshesCount = brg.UniqueMeshes.IsCreated ? brg.UniqueMeshes.Length : 0;
                 if (materialsCount <= 0 || meshesCount <= 0) continue;
 
-                if (materialsCount == 1 && meshesCount == 1)
+                var ce = chunkEntries[c];
+                if (ce.SingleBin >= 0)
                 {
-                    ushort sub = (ushort)mmis[0].SubMesh;
-
-                    var s0 = new DrawCommandSettings
+                    int singleBin = ce.SingleBin;
+                    int dst = bins.Offsets[singleBin] + bins.Cursors[singleBin];
+                    int src = chunkStart;
+                    int l = len;
+                    
+                    int l8 = l & ~7;
+                    int idx = 0;
+                    for (; idx < l8; idx += 8)
                     {
-                        FilterIndex = filterIndex,
-                        SortingOrder = sortingOrder,
-                        Flags = 0,
-                        MaterialID = brg.UniqueMaterials[0],
-                        MeshID = brg.UniqueMeshes[0],
-                        SplitMask = 0,
-                        SubMeshIndex = sub,
-                        BatchID = batchID
-                    };
-                    s0.ComputeHashCode();
-                    if (!bins.Map.TryGetValue(s0, out int b)) continue;
-
-                    int dst = bins.Offsets[b] + bins.Cursors[b];
-                    for (int i = 0; i < len; ++i) vi[dst + i] = chunkStart + i;
-                    bins.Cursors[b] += len;
+                        vi[dst] = src; vi[dst+1] = src+1; vi[dst+2] = src+2; vi[dst+3] = src+3;
+                        vi[dst+4] = src+4; vi[dst+5] = src+5; vi[dst+6] = src+6; vi[dst+7] = src+7;
+                        dst += 8; src += 8;
+                    }
+                    for (; idx < l; ++idx) vi[dst++] = src++;
+                    bins.Cursors[singleBin] = dst - bins.Offsets[singleBin];
                     continue;
                 }
 
+                var slice = chunkEntries[c];
+                if (slice.Length <= 0) continue;
+                var ePtr = (ChunkKEntry*)entries.Ptr + slice.Start;
+
                 int count = materialsCount * meshesCount;
+                int* k2idx = stackalloc int[count];
+                UnsafeUtility.MemSet(k2idx, 0xFF, count * sizeof(int));
 
-                int* counts = stackalloc int[count];
-                ushort* submesh = stackalloc ushort[count];
-                for (int k = 0; k < count; ++k) submesh[k] = 0xFFFF;
-
-                for (int i = 0; i < len; ++i)
+                int* writePtr = stackalloc int[slice.Length];
+                for (int i = 0; i < slice.Length; ++i)
                 {
-                    var mmi = mmis[i];
-                    int mi = mmi.MaterialArrayIndex;
-                    int xi = mmi.MeshArrayIndex;
-                    if ((uint)mi >= (uint)materialsCount || (uint)xi >= (uint)meshesCount) continue;
-                    int k = mi * meshesCount + xi;
-                    if (++counts[k] == 1) submesh[k] = (ushort)mmi.SubMesh;
-                }
-
-                int* binIndexOfK = stackalloc int[count];
-                int* writePtr = stackalloc int[count];
-                for (int k = 0; k < count; ++k) { binIndexOfK[k] = -1; writePtr[k] = 0; }
-
-                for (int k = 0; k < count; ++k)
-                {
-                    int n = counts[k];
-                    if (n == 0) continue;
-
-                    int matIdx = k / meshesCount;
-                    int mshIdx = k % meshesCount;
-                    var s = new DrawCommandSettings
-                    {
-                        FilterIndex = filterIndex,
-                        SortingOrder = sortingOrder,
-                        Flags = 0,
-                        MaterialID = brg.UniqueMaterials[matIdx],
-                        MeshID = brg.UniqueMeshes[mshIdx],
-                        SplitMask = 0,
-                        SubMeshIndex = submesh[k],
-                        BatchID = batchID
-                    };
-                    s.ComputeHashCode();
-                    if (!bins.Map.TryGetValue(s, out int b)) continue;
-                    binIndexOfK[k] = b;
-                    writePtr[k] = bins.Offsets[b] + bins.Cursors[b];
+                    k2idx[ePtr[i].K] = i;
+                    writePtr[i] = bins.Offsets[ePtr[i].Bin] + bins.Cursors[ePtr[i].Bin];
                 }
 
                 for (int i = 0; i < len; ++i)
                 {
                     var mmi = mmis[i];
-                    int mi = mmi.MaterialArrayIndex;
-                    int xi = mmi.MeshArrayIndex;
+                    int mi = mmi.MaterialArrayIndex, xi = mmi.MeshArrayIndex;
                     if ((uint)mi >= (uint)materialsCount || (uint)xi >= (uint)meshesCount) continue;
                     int k = mi * meshesCount + xi;
-                    int b = binIndexOfK[k];
-                    if (b < 0) continue;
-                    int p = writePtr[k]++;
+                    int idx = k2idx[k];
+                    if (idx < 0) continue;
+                    int p = writePtr[idx]++;
                     vi[p] = chunkStart + i;
                 }
 
-                for (int k = 0; k < count; ++k)
+                for (int i = 0; i < slice.Length; ++i)
                 {
-                    int b = binIndexOfK[k];
-                    if (b < 0) continue;
-                    bins.Cursors[b] = writePtr[k] - bins.Offsets[b];
+                    int b = ePtr[i].Bin;
+                    bins.Cursors[b] = writePtr[i] - bins.Offsets[b];
                 }
+            }
+
+            const int MaxInstPerRange = EntitiesGraphicsTuningConstants.kMaxInstancesPerDrawRange;
+            const int MaxCmdsPerRange = EntitiesGraphicsTuningConstants.kMaxDrawCommandsPerDrawRange;
+
+            var tmpRanges = new UnsafeList<BatchDrawRange>(
+                math.max(32, (bins.Keys.Length + 1) / 2),
+                m_ThreadLocalAllocators.GeneralAllocator->Handle,
+                NativeArrayOptions.UninitializedMemory);
+
+            int curFilter = -1;
+            int curBegin = 0;
+            int curCount = 0;
+            int curInsts = 0;
+            bool curAllDepthSorted = true;
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            void FlushRange()
+            {
+                if (curCount <= 0) return;
+                var fs = m_FilterSettings.TryGetValue(curFilter, out var f) ? f : MakeFilterSettings(RenderFilterSettings.Default);
+                fs.allDepthSorted = curAllDepthSorted;
+                tmpRanges.Add(new BatchDrawRange
+                {
+                    filterSettings = fs,
+                    drawCommandsBegin = (uint)curBegin,
+                    drawCommandsCount = (uint)curCount
+                });
+                curFilter = -1; curBegin = 0; curCount = 0; curInsts = 0; curAllDepthSorted = true;
             }
 
             int dc = 0;
@@ -338,6 +362,7 @@ namespace Unity.Rendering
                 while (left > 0)
                 {
                     int take = math.min(EntitiesGraphicsTuningConstants.kMaxInstancesPerDrawCommand, left);
+
                     out0.drawCommands[dc] = new BatchDrawCommand
                     {
                         visibleOffset = (uint)(baseOff + local),
@@ -351,26 +376,57 @@ namespace Unity.Rendering
                         sortingPosition = key.SortingOrder
                     };
 
-                    var fs = m_FilterSettings.TryGetValue(key.FilterIndex, out var f) ? f : MakeFilterSettings(RenderFilterSettings.Default);
-                    fs.allDepthSorted = false;
-                    out0.drawRanges[dc] = new BatchDrawRange
+                    int filterIdx = key.FilterIndex;
+                    bool hasPos = (out0.drawCommands[dc].flags & BatchDrawCommandFlags.HasSortingPosition) != 0;
+
+                    bool startNew =
+                        (curCount == 0) ||
+                        (filterIdx != curFilter) ||
+                        (curInsts + take > MaxInstPerRange) ||
+                        (curCount + 1 > MaxCmdsPerRange);
+
+                    if (startNew)
                     {
-                        filterSettings = fs,
-                        drawCommandsBegin = (uint)dc,
-                        drawCommandsCount = 1
-                    };
-                    dc++; local += take; left -= take;
+                        FlushRange();
+                        curFilter = filterIdx;
+                        curBegin = dc;
+                        curCount = 1;
+                        curInsts = take;
+                        curAllDepthSorted = hasPos;
+                    }
+                    else
+                    {
+                        curCount++;
+                        curInsts += take;
+                        curAllDepthSorted &= hasPos;
+                    }
+
+                    ++dc;
+                    local += take;
+                    left -= take;
                 }
             }
+            FlushRange();
+
+            out0.drawRangeCount = tmpRanges.Length;
+            out0.drawRanges = (out0.drawRangeCount > 0)
+                ? ChunkDrawCommandOutput.Malloc<BatchDrawRange>(out0.drawRangeCount)
+                : null;
+            if (out0.drawRangeCount > 0)
+                UnsafeUtility.MemCpy(out0.drawRanges, tmpRanges.Ptr, out0.drawRangeCount * sizeof(BatchDrawRange));
 
             output.drawCommands[0] = out0;
+
+            tmpRanges.Dispose();
             sorted.Dispose();
             bins.Dispose();
             chunks.Dispose();
             chunkVisible.Dispose();
+            chunkEntries.Dispose();
+            entries.Dispose();
 
             Profiler.EndSample();
-            return m_CullingJobDependency;
+            return default;
         }
 
         private unsafe struct KeyIndexComparer : IComparer<int>
@@ -401,7 +457,8 @@ namespace Unity.Rendering
             var d = o.drawCommands[0];
             d.visibleInstanceCount = 0; d.visibleInstances = null;
             d.instanceSortingPositionFloatCount = 0; d.instanceSortingPositions = null;
-            d.drawCommandCount = 0; d.drawCommands = null; d.drawCommandPickingInstanceIDs = null;
+            d.drawCommandCount = 0; d.drawCommands = null;
+            d.drawCommandPickingInstanceIDs = null;
             d.drawRangeCount = 0; d.drawRanges = null;
             o.drawCommands[0] = d;
         }
